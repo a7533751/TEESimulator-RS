@@ -217,7 +217,7 @@ object DeviceAttestationService {
 
     /**
      * Whether [error] definitively means the hardware cannot attest the probed key: a permanent
-     * A permanent Keystore failure from the device. This deliberately avoids linking the newer
+     * Keystore failure from the device. This deliberately avoids linking the newer
      * `KeyStoreException.isTransientFailure()` API because Android 9 does not expose that method.
      * Unknown and transient failures fail open so a one-off keystore hiccup never freezes the
      * device into forging an attestation it can serve.
@@ -225,16 +225,30 @@ object DeviceAttestationService {
     private fun isAttestationUnavailable(error: Throwable): Boolean {
         var cause: Throwable? = error
         while (cause != null) {
-            if (cause.javaClass.name == "android.security.KeyStoreException") {
+            val currentCause = cause
+            if (currentCause.javaClass.name == "android.security.KeyStoreException") {
+                // isTransientFailure() was added after Pie. Reflectively use it where present so
+                // newer releases retain the original permanent-vs-transient classification.
+                val isTransient =
+                    runCatching {
+                            currentCause.javaClass
+                                .getMethod("isTransientFailure")
+                                .invoke(currentCause) as Boolean
+                        }
+                        .getOrNull()
+                if (isTransient != null) return !isTransient
+
                 val code =
                     runCatching {
-                            cause.javaClass.getMethod("getErrorCode").invoke(cause) as Int
+                            currentCause.javaClass
+                                .getMethod("getErrorCode")
+                                .invoke(currentCause) as Int
                         }
                         .getOrNull()
                 // QTI's -10003 is the known permanent factory-attestation failure on Pie.
                 return code == -10003
             }
-            cause = cause.cause
+            cause = currentCause.cause
         }
         return false
     }

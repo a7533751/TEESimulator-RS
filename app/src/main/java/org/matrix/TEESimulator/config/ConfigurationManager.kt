@@ -291,7 +291,9 @@ object ConfigurationManager {
      * A FileObserver that monitors the configuration directory for changes and triggers reloads of
      * the relevant settings.
      */
-    private object ConfigObserver : FileObserver(configRoot, CLOSE_WRITE or MOVED_TO or DELETE) {
+    // FileObserver(File, ...) was added in API 29; keep the String overload for API 28.
+    private object ConfigObserver :
+        FileObserver(configRoot.absolutePath, CLOSE_WRITE or MOVED_TO or DELETE) {
         override fun onEvent(event: Int, path: String?) {
             path ?: return
             SystemLogger.info("Configuration file change detected: $path (event: $event)")

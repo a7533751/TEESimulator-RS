@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
@@ -72,8 +73,10 @@ object SoterProcessSupervisor {
     private val connection =
         object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                SystemLogger.debug("SOTER service connected; mounting forge")
-                service?.let(::mount)
+                handler.post {
+                    SystemLogger.debug("SOTER service connected; mounting forge")
+                    service?.let(::mount)
+                }
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
@@ -96,7 +99,14 @@ object SoterProcessSupervisor {
         val intent = Intent(SoterServiceInterceptor.DESCRIPTOR).setPackage(SOTER_PACKAGE)
         val bound =
             runCatching {
-                    context.bindService(intent, Context.BIND_AUTO_CREATE, executor, connection)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        context.bindService(intent, Context.BIND_AUTO_CREATE, executor, connection)
+                    } else {
+                        // The Executor overload was added in API 29. The legacy overload is
+                        // available on Pie; callbacks are short-lived and immediately re-posted
+                        // by the connection when they need the supervisor thread.
+                        context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+                    }
                 }
                 .getOrElse {
                     SystemLogger.debug { "SOTER bindService threw: $it" }

@@ -179,6 +179,9 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
         val parcel = Parcel.obtain()
         parcel.writeNoException()
         parcel.writeInt(KeyStore.NO_ERROR)
+        // IKeystoreService.attestKey has an `out` Parcelable parameter. AIDL writes a non-null
+        // marker before the KeymasterCertificateChain payload.
+        parcel.writeInt(1)
         certificateChain.writeToParcel(parcel, 0)
         return TransactionResult.OverrideReply(parcel)
     }
