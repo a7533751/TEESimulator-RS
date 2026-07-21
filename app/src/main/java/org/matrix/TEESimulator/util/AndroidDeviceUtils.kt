@@ -374,6 +374,7 @@ object AndroidDeviceUtils {
             Build.VERSION_CODES.S to 120000,
             Build.VERSION_CODES.R to 110000,
             Build.VERSION_CODES.Q to 100000,
+            Build.VERSION_CODES.P to 90000,
         )
 
     val osVersion: Int
@@ -384,6 +385,7 @@ object AndroidDeviceUtils {
 
     private val attestVersionMap =
         mapOf(
+            Build.VERSION_CODES.P to 3, // Keymaster 4.0 attestation schema
             Build.VERSION_CODES.Q to 4, // Keymaster 4.1
             Build.VERSION_CODES.R to 4, // Keymaster 4.1
             Build.VERSION_CODES.S to 100, // KeyMint 1.0
@@ -423,7 +425,15 @@ object AndroidDeviceUtils {
      * @param securityLevel The security level, used to determine the correct attestation version.
      * @return The appropriate Keymaster or KeyMint version number.
      */
-    fun getKeymasterVersion(securityLevel: Int): Int = getAttestVersion(securityLevel)
+    private val keymasterVersionMap =
+        mapOf(
+            Build.VERSION_CODES.P to 4, // Keymaster 4.0
+            Build.VERSION_CODES.Q to 4, // Keymaster 4.1
+            Build.VERSION_CODES.R to 4, // Keymaster 4.1
+        )
+
+    fun getKeymasterVersion(securityLevel: Int): Int =
+        keymasterVersionMap[Build.VERSION.SDK_INT] ?: getAttestVersion(securityLevel)
 
     // --- APEX and Module Hash Properties ---
 

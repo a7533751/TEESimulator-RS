@@ -14,6 +14,7 @@ import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.AbstractKeystoreInterceptor
 import org.matrix.TEESimulator.interception.keystore.Keystore2Interceptor
 import org.matrix.TEESimulator.interception.keystore.KeystoreInterceptor
+import org.matrix.TEESimulator.interception.keystore.KeystorePInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.pki.NativeCertGen
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
@@ -143,6 +144,14 @@ object App {
      */
     private fun selectKeystoreInterceptor(): AbstractKeystoreInterceptor =
         when {
+            // Android Pie still uses the pre-Q synchronous IKeystoreService contract.
+            Build.VERSION.SDK_INT == Build.VERSION_CODES.P -> {
+                SystemLogger.info(
+                    "Using KeystorePInterceptor for Android Pie (SDK ${Build.VERSION.SDK_INT})"
+                )
+                android.security.keystore.AndroidKeyStoreProvider.install()
+                KeystorePInterceptor
+            }
             // For Android Q (10) and R (11), use the original KeystoreInterceptor.
             Build.VERSION.SDK_INT in Build.VERSION_CODES.Q..Build.VERSION_CODES.R -> {
                 SystemLogger.info(

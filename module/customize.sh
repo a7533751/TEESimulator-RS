@@ -1,6 +1,6 @@
 # shellcheck disable=SC2034
 SKIPUNZIP=1
-MIN_SDK=29
+MIN_SDK=28
 CONFIG_DIR=/data/adb/tricky_store
 
 # --- Installation Context Check ---
@@ -17,6 +17,10 @@ fi
 VERSION=$(grep_prop version "${TMPDIR}/module.prop")
 ui_print "- Installing TEESimulator-RS $VERSION"
 ui_print ""
+
+# A previous boot may have fail-closed after an injection error. Reinstalling a newer build
+# explicitly clears that marker so the new code can be tested.
+rm -f "$MODPATH/disable"
 
 # --- Architecture Handling ---
 case "$ARCH" in
