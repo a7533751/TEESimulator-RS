@@ -128,6 +128,8 @@ namespace intercept {
 // Interceptor protocol codes (User space agreement between App and Interceptor Service)
 constexpr uint32_t kRegisterInterceptor = 1;
 constexpr uint32_t kUnregisterInterceptor = 2;
+// Request a target UID for one matching root-originated binder call.
+constexpr uint32_t kSetCallingUid = 3;
 
 constexpr uint32_t kPreTransact = 1;
 constexpr uint32_t kPostTransact = 2;
@@ -208,6 +210,12 @@ int (*g_original_ioctl)(int fd, int request, ...) = nullptr;
 // Unique ID generator for transactions
 static std::atomic<uint64_t> g_transaction_id_counter = 0;
 
+// Legacy keystore rejects UID delegation from the system UID. The override is consumed only by
+// the matching transaction code and is cleared immediately afterwards.
+static std::atomic<int32_t> g_next_root_call_uid{-1};
+static std::atomic<int32_t> g_next_root_call_pid{-1};
+static std::atomic<uint32_t> g_next_root_call_code{0};
+
 // Context info to pass from the ioctl hook (processBinderWriteRead) to the BinderStub.
 struct ThreadTransactionInfo {
     uint64_t transaction_id;
@@ -263,6 +271,7 @@ protected:
 private:
     status_t handleRegister(const Parcel &data);
     status_t handleUnregister(const Parcel &data);
+    status_t handleSetCallingUid(const Parcel &data);
 
     // Helpers to serialize data for the remote callback interface
     status_t writeTransactionData(Parcel &out, uint64_t tx_id, sp<BBinder> target, uint32_t code, uint32_t flags,
@@ -372,8 +381,21 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
     } else if (txn_data->sender_euid == 0) {
         // The kernel driver fills sender_euid.
         // libbinder.so trusts this value to populate IPCThreadState.
-        txn_data->sender_euid = 1000;
-        LOGV("[Hook] Spoofing UID for transaction: 0 -> %d", txn_data->sender_euid);
+        const int32_t override_uid = g_next_root_call_uid.load(std::memory_order_acquire);
+        const int32_t override_pid = g_next_root_call_pid.load(std::memory_order_acquire);
+        const uint32_t override_code = g_next_root_call_code.load(std::memory_order_acquire);
+        if (override_uid >= 0 && override_pid > 0 && txn_data->code == override_code) {
+            g_next_root_call_uid.store(-1, std::memory_order_release);
+            g_next_root_call_pid.store(-1, std::memory_order_release);
+            g_next_root_call_code.store(0, std::memory_order_release);
+            txn_data->sender_euid = static_cast<uint32_t>(override_uid);
+            txn_data->sender_pid = override_pid;
+            LOGV("[Hook] Preserving caller uid=%d pid=%d for transaction %u", txn_data->sender_euid,
+                 txn_data->sender_pid, txn_data->code);
+        } else {
+            txn_data->sender_euid = 1000;
+            LOGV("[Hook] Spoofing UID for transaction: 0 -> %d", txn_data->sender_euid);
+        }
         hijack = false; // Never hijack to avoid recursion
     // Check 3: Normal interception based on registry of monitored binders
     } else {
@@ -512,9 +534,34 @@ status_t BinderInterceptor::onTransact(uint32_t code, const Parcel &data, Parcel
         return handleRegister(data);
     case intercept::kUnregisterInterceptor:
         return handleUnregister(data);
+    case intercept::kSetCallingUid:
+        return handleSetCallingUid(data);
     default:
         return BBinder::onTransact(code, data, reply, flags);
     }
+}
+
+status_t BinderInterceptor::handleSetCallingUid(const Parcel &data) {
+    int32_t uid = -1;
+    int32_t pid = -1;
+    uint32_t transaction_code = 0;
+    if (data.readInt32(&uid) != OK || data.readInt32(&pid) != OK ||
+        data.readUint32(&transaction_code) != OK) {
+        return BAD_VALUE;
+    }
+
+    if (uid < 0) {
+        g_next_root_call_uid.store(-1, std::memory_order_release);
+        g_next_root_call_pid.store(-1, std::memory_order_release);
+        g_next_root_call_code.store(0, std::memory_order_release);
+        return OK;
+    }
+    if (pid <= 0 || transaction_code == 0) return BAD_VALUE;
+
+    g_next_root_call_code.store(transaction_code, std::memory_order_release);
+    g_next_root_call_pid.store(pid, std::memory_order_release);
+    g_next_root_call_uid.store(uid, std::memory_order_release);
+    return OK;
 }
 
 status_t BinderInterceptor::handleRegister(const Parcel &data) {

@@ -31,6 +31,8 @@ abstract class AbstractKeystoreInterceptor : BinderInterceptor() {
 
     /** The original IBinder for the Keystore service. */
     protected lateinit var keystoreService: IBinder
+    /** The injected native interceptor's control binder. */
+    private lateinit var interceptorBackdoor: IBinder
     private var injectionAttempted = false
     private var retryCount = 0
     private val maxRetries = 5
@@ -73,10 +75,24 @@ abstract class AbstractKeystoreInterceptor : BinderInterceptor() {
 
     private fun setupInterceptor(service: IBinder, backdoor: IBinder) {
         keystoreService = service
+        interceptorBackdoor = backdoor
         SystemLogger.info("Registering interceptor for service: $serviceName")
         register(backdoor, service, this, interceptedCodes)
         service.linkToDeath(createDeathRecipient(), 0)
         onInterceptorReady(service, backdoor)
+    }
+
+    /** Preserve an app UID for one matching legacy Binder call made by this root process. */
+    protected fun prepareCallingUid(uid: Int, pid: Int, transactionCode: Int): Boolean {
+        if (!::interceptorBackdoor.isInitialized) return false
+        return BinderInterceptor.prepareCallingUid(interceptorBackdoor, uid, pid, transactionCode)
+    }
+
+    /** Clear a pending UID override after a guarded call completes. */
+    protected fun clearCallingUid() {
+        if (::interceptorBackdoor.isInitialized) {
+            BinderInterceptor.clearCallingUid(interceptorBackdoor)
+        }
     }
 
     /**

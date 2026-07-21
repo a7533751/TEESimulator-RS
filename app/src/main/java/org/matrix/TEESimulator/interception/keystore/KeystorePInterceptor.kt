@@ -36,6 +36,9 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
     private val attestKeyTransaction by lazy {
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "attestKey")
     }
+    private val exportKeyTransaction by lazy {
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "exportKey")
+    }
 
     private val keygenParameters =
         ConcurrentHashMap<KeyIdentifier, LegacyKeygenParameters>()
@@ -111,7 +114,7 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
                     ByteArray(0),
                 )
 
-            val publicKey = exportPublicKey(rawAlias, callingUid)
+            val publicKey = exportPublicKey(rawAlias, callingUid, callingPid)
                 ?: return@runCatching TransactionResult.SkipTransaction
             val subjectKeyPair = KeyPair(publicKey, null)
             val chain = CertificateGenerator.generateCertificateChain(
@@ -153,15 +156,25 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
         return args
     }
 
-    private fun exportPublicKey(rawAlias: String, uid: Int) = runCatching {
+    private fun exportPublicKey(rawAlias: String, uid: Int, pid: Int) = runCatching {
         val empty = KeymasterBlob(ByteArray(0))
-        val result = KeyStore.getInstance().exportKey(
-            rawAlias,
-            KeymasterDefs.KM_KEY_FORMAT_X509,
-            empty,
-            empty,
-            uid,
-        )
+        if (!prepareCallingUid(uid, pid, exportKeyTransaction)) {
+            SystemLogger.warning(
+                "Cannot prepare UID delegation for exportKey (uid=$uid pid=$pid code=$exportKeyTransaction)"
+            )
+            return@runCatching null
+        }
+        val result = try {
+            KeyStore.getInstance().exportKey(
+                rawAlias,
+                KeymasterDefs.KM_KEY_FORMAT_X509,
+                empty,
+                empty,
+                uid,
+            )
+        } finally {
+            clearCallingUid()
+        }
         if (result == null || result.resultCode != KeyStore.NO_ERROR) return@runCatching null
         val algorithm = if (result.exportData.firstOrNull() == 0x30.toByte()) {
             // X.509 SubjectPublicKeyInfo is self-describing; try EC first, then RSA.
