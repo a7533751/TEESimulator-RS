@@ -385,7 +385,7 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
  * KeymasterArguments. It is used exclusively by the KeystoreInterceptor to manage state during the
  * software key generation flow.
  */
-private data class LegacyKeygenParameters(
+internal data class LegacyKeygenParameters(
     val algorithm: Int,
     val keySize: Int,
     val purpose: List<Int>,

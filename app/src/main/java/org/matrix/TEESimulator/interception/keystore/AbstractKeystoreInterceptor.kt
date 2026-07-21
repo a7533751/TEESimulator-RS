@@ -2,6 +2,7 @@ package org.matrix.TEESimulator.interception.keystore
 
 import android.os.IBinder
 import android.os.ServiceManager
+import java.io.File
 import kotlin.system.exitProcess
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
@@ -87,35 +88,48 @@ abstract class AbstractKeystoreInterceptor : BinderInterceptor() {
             SystemLogger.warning(
                 "Backdoor not found. Attempting to inject native library into '$processName'."
             )
-            performInjection()
-            injectionAttempted = true
+            if (performInjection()) {
+                injectionAttempted = true
+            }
         }
 
         retryCount++
         if (retryCount >= maxRetries) {
-            SystemLogger.error(
-                "Failed to find backdoor after $maxRetries retries. The service may have crashed or injection failed. Exiting."
+            disableSafely(
+                "Failed to find backdoor after $maxRetries retries; leaving the system Keystore untouched."
             )
-            exitProcess(1)
         }
     }
 
     /** Executes the shell command to inject the native library into the target process. */
-    private fun performInjection() {
+    private fun performInjection(): Boolean {
         try {
             val command = arrayOf("/system/bin/sh", "-c", injectionCommand)
             SystemLogger.debug("Executing injection command: ${command.joinToString(" ")}")
             val process = Runtime.getRuntime().exec(command)
             val exitCode = process.waitFor()
             if (exitCode != 0) {
-                SystemLogger.error("Injection process failed with exit code $exitCode. Exiting.")
-                exitProcess(1)
+                SystemLogger.error("Injection process failed with exit code $exitCode.")
+                return false
             }
             SystemLogger.info("Injection process completed.")
+            return true
         } catch (e: Exception) {
-            SystemLogger.error("An exception occurred during injection. Exiting.", e)
-            exitProcess(1)
+            SystemLogger.error("An exception occurred during injection.", e)
+            return false
         }
+    }
+
+    /** Disable the module before terminating so the supervisor cannot restart a failing hook. */
+    private fun disableSafely(reason: String): Nothing {
+        val moduleDir = File("/data/adb/modules/tricky_store")
+        runCatching {
+            moduleDir.mkdirs()
+            File(moduleDir, "tee_status.txt").writeText("disabled\nreason=$reason\n")
+            File(moduleDir, "disable").createNewFile()
+        }.onFailure { SystemLogger.error("Failed to write fail-closed disable marker.", it) }
+        SystemLogger.error(reason)
+        exitProcess(1)
     }
 
     /**

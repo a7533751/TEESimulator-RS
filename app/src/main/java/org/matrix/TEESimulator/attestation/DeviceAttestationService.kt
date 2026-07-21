@@ -1,7 +1,6 @@
 package org.matrix.TEESimulator.attestation
 
 import android.annotation.SuppressLint
-import android.security.KeyStoreException
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyPairGenerator
@@ -218,16 +217,23 @@ object DeviceAttestationService {
 
     /**
      * Whether [error] definitively means the hardware cannot attest the probed key: a permanent
-     * [KeyStoreException] from the keystore. Transient failures and non-keystore errors return
-     * `false`, so the caller fails open and re-probes rather than caching a guess. The probe runs a
-     * fixed, valid spec as root, so its only permanent keystore failure mode is missing attestation
-     * support; [KeyStoreException.isTransientFailure] draws the transient/permanent line.
+     * A permanent Keystore failure from the device. This deliberately avoids linking the newer
+     * `KeyStoreException.isTransientFailure()` API because Android 9 does not expose that method.
+     * Unknown and transient failures fail open so a one-off keystore hiccup never freezes the
+     * device into forging an attestation it can serve.
      */
     private fun isAttestationUnavailable(error: Throwable): Boolean {
         var cause: Throwable? = error
         while (cause != null) {
-            val keyStoreError = cause as? KeyStoreException
-            if (keyStoreError != null) return !keyStoreError.isTransientFailure
+            if (cause.javaClass.name == "android.security.KeyStoreException") {
+                val code =
+                    runCatching {
+                            cause.javaClass.getMethod("getErrorCode").invoke(cause) as Int
+                        }
+                        .getOrNull()
+                // QTI's -10003 is the known permanent factory-attestation failure on Pie.
+                return code == -10003
+            }
             cause = cause.cause
         }
         return false

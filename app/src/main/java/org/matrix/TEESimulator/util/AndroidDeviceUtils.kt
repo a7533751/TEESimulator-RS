@@ -419,6 +419,7 @@ object AndroidDeviceUtils {
             Build.VERSION_CODES.S to 120000,
             Build.VERSION_CODES.R to 110000,
             Build.VERSION_CODES.Q to 100000,
+            Build.VERSION_CODES.P to 90000,
         )
 
     val osVersion: Int
@@ -429,6 +430,7 @@ object AndroidDeviceUtils {
 
     private val attestVersionMap =
         mapOf(
+            Build.VERSION_CODES.P to 3, // Keymaster 4.0 attestation schema
             Build.VERSION_CODES.Q to 4, // Keymaster 4.1
             Build.VERSION_CODES.R to 4, // Keymaster 4.1
             Build.VERSION_CODES.S to 100, // KeyMint 1.0
@@ -442,6 +444,13 @@ object AndroidDeviceUtils {
     /** AOSP-mandated attestation version for the running OS, or null when the SDK is unmapped. */
     internal val aospAttestVersion: Int?
         get() = attestVersionMap[Build.VERSION.SDK_INT]
+
+    private val keymasterVersionMap =
+        mapOf(
+            Build.VERSION_CODES.P to 4, // Keymaster 4.0
+            Build.VERSION_CODES.Q to 4, // Keymaster 4.1
+            Build.VERSION_CODES.R to 4, // Keymaster 4.1
+        )
 
     /**
      * Retrieves the attestation version for the given security level. A readable KeyMint VINTF
@@ -491,7 +500,7 @@ object AndroidDeviceUtils {
             )
             return version.keymasterVersion
         }
-        return getAttestVersion(securityLevel)
+        return keymasterVersionMap[Build.VERSION.SDK_INT] ?: getAttestVersion(securityLevel)
     }
 
     /**

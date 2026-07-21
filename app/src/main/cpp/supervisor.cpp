@@ -9,6 +9,7 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <string>
 
 static volatile sig_atomic_t should_exit = 0;
 
@@ -28,10 +29,16 @@ int main(int argc, char *argv[]) {
 
     const char *daemon_path = argv[1];
     char **daemon_argv = &argv[1];
+    const char *module_dir = argc >= 3 ? argv[2] : nullptr;
+
+    auto module_disabled = [&]() {
+        return module_dir != nullptr && access((std::string(module_dir) + "/disable").c_str(), F_OK) == 0;
+    };
 
     int backoff_ms = 500;
 
     while (!should_exit) {
+        if (module_disabled()) break;
         struct timespec child_start;
         clock_gettime(CLOCK_MONOTONIC, &child_start);
 
@@ -57,6 +64,7 @@ int main(int argc, char *argv[]) {
         waitpid(pid, &status, 0);
 
         if (should_exit) break;
+        if (module_disabled()) break;
 
         // Exponential backoff on rapid crashes, reset if child was stable
         struct timespec now;

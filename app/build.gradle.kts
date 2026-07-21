@@ -47,7 +47,7 @@ android {
 
     defaultConfig {
         applicationId = "org.matrix.TEESimulator"
-        minSdk = 29
+        minSdk = 28
         targetSdk = 36
         versionCode = gitCommitCount
         versionName = verName

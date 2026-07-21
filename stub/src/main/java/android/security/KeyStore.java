@@ -1,5 +1,8 @@
 package android.security;
 
+import android.security.keymaster.ExportResult;
+import android.security.keymaster.KeymasterBlob;
+
 public class KeyStore {
     public static final int CANNOT_ATTEST_IDS = -66;
     public static final int CONFIRMATIONUI_ABORTED = 2;
@@ -35,5 +38,11 @@ public class KeyStore {
     public static final int UNINITIALIZED = 3;
     public static final int VALUE_CORRUPTED = 8;
     public static final int WRONG_PASSWORD = 10;
-}
 
+    public static KeyStore getInstance() { throw new UnsupportedOperationException("STUB!"); }
+
+    public ExportResult exportKey(
+            String alias, int format, KeymasterBlob clientId, KeymasterBlob appId, int uid) {
+        throw new UnsupportedOperationException("STUB!");
+    }
+}
