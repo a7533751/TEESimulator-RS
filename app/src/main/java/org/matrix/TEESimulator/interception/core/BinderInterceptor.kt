@@ -250,6 +250,8 @@ abstract class BinderInterceptor : Binder() {
         private const val REGISTER_INTERCEPTOR_CODE = 1
         // Code used by the backdoor binder to unregister an interceptor.
         private const val UNREGISTER_INTERCEPTOR_CODE = 2
+        // Code used to preserve an app UID for one matching root-originated binder call.
+        const val SET_CALLING_UID_CODE = 3
 
         // --- Hook Type Codes ---
         // Indicates that the call is for a pre-transaction hook.
@@ -310,6 +312,51 @@ abstract class BinderInterceptor : Binder() {
                 SystemLogger.info("Registered interceptor for target: $target (${filteredCodes.size} filtered codes)")
             } catch (e: Exception) {
                 SystemLogger.error("Failed to register binder interceptor.", e)
+            } finally {
+                data.recycle()
+                reply.recycle()
+            }
+        }
+
+        /**
+         * Requests that the injected native hook use [uid] for the next root-originated call with
+         * [transactionCode]. Legacy keystore rejects UID delegation from the system UID, and its
+         * SELinux check also uses the original caller PID.
+         */
+        fun prepareCallingUid(
+            backdoor: IBinder,
+            uid: Int,
+            pid: Int,
+            transactionCode: Int,
+        ): Boolean {
+            if (uid < 0 || pid <= 0 || transactionCode <= 0) return false
+            val data = Parcel.obtain()
+            val reply = Parcel.obtain()
+            return try {
+                data.writeInt(uid)
+                data.writeInt(pid)
+                data.writeInt(transactionCode)
+                backdoor.transact(SET_CALLING_UID_CODE, data, reply, 0)
+            } catch (e: Exception) {
+                SystemLogger.warning("Failed to prepare legacy keystore calling UID.", e)
+                false
+            } finally {
+                data.recycle()
+                reply.recycle()
+            }
+        }
+
+        /** Clears a pending UID override when the guarded call did not reach Binder. */
+        fun clearCallingUid(backdoor: IBinder) {
+            val data = Parcel.obtain()
+            val reply = Parcel.obtain()
+            try {
+                data.writeInt(-1)
+                data.writeInt(-1)
+                data.writeInt(0)
+                backdoor.transact(SET_CALLING_UID_CODE, data, reply, 0)
+            } catch (e: Exception) {
+                SystemLogger.warning("Failed to clear legacy keystore calling UID.", e)
             } finally {
                 data.recycle()
                 reply.recycle()
