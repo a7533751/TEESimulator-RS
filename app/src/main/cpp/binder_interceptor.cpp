@@ -212,9 +212,14 @@ static std::atomic<uint64_t> g_transaction_id_counter = 0;
 
 // Legacy keystore rejects UID delegation from the system UID. The override is consumed only by
 // the matching transaction code and is cleared immediately afterwards.
-static std::atomic<int32_t> g_next_root_call_uid{-1};
-static std::atomic<int32_t> g_next_root_call_pid{-1};
-static std::atomic<uint32_t> g_next_root_call_code{0};
+struct RootCallOverride {
+    int32_t uid = -1;
+    int32_t pid = -1;
+    uint32_t code = 0;
+};
+
+static std::mutex g_root_call_mutex;
+static RootCallOverride g_next_root_call;
 
 // Context info to pass from the ioctl hook (processBinderWriteRead) to the BinderStub.
 struct ThreadTransactionInfo {
@@ -381,15 +386,18 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
     } else if (txn_data->sender_euid == 0) {
         // The kernel driver fills sender_euid.
         // libbinder.so trusts this value to populate IPCThreadState.
-        const int32_t override_uid = g_next_root_call_uid.load(std::memory_order_acquire);
-        const int32_t override_pid = g_next_root_call_pid.load(std::memory_order_acquire);
-        const uint32_t override_code = g_next_root_call_code.load(std::memory_order_acquire);
-        if (override_uid >= 0 && override_pid > 0 && txn_data->code == override_code) {
-            g_next_root_call_uid.store(-1, std::memory_order_release);
-            g_next_root_call_pid.store(-1, std::memory_order_release);
-            g_next_root_call_code.store(0, std::memory_order_release);
-            txn_data->sender_euid = static_cast<uint32_t>(override_uid);
-            txn_data->sender_pid = override_pid;
+        RootCallOverride pending;
+        {
+            std::lock_guard<std::mutex> lock(g_root_call_mutex);
+            if (g_next_root_call.uid >= 0 && g_next_root_call.pid > 0 &&
+                txn_data->code == g_next_root_call.code) {
+                pending = g_next_root_call;
+                g_next_root_call = {};
+            }
+        }
+        if (pending.uid >= 0) {
+            txn_data->sender_euid = static_cast<uint32_t>(pending.uid);
+            txn_data->sender_pid = pending.pid;
             LOGV("[Hook] Preserving caller uid=%d pid=%d for transaction %u", txn_data->sender_euid,
                  txn_data->sender_pid, txn_data->code);
         } else {
@@ -548,16 +556,16 @@ status_t BinderInterceptor::handleSetCallingUid(const Parcel &data) {
     }
 
     if (uid < 0) {
-        g_next_root_call_uid.store(-1, std::memory_order_release);
-        g_next_root_call_pid.store(-1, std::memory_order_release);
-        g_next_root_call_code.store(0, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(g_root_call_mutex);
+        g_next_root_call = {};
         return OK;
     }
     if (pid <= 0 || transaction_code == 0) return BAD_VALUE;
 
-    g_next_root_call_code.store(transaction_code, std::memory_order_release);
-    g_next_root_call_pid.store(pid, std::memory_order_release);
-    g_next_root_call_uid.store(uid, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(g_root_call_mutex);
+        g_next_root_call = {uid, pid, transaction_code};
+    }
     return OK;
 }
 
@@ -644,26 +652,32 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
 
     status_t pre_status = callback->transact(intercept::kPreTransact, pre_req, &pre_resp);
     if (pre_status != OK) {
-        // Block when interceptor is dead to prevent privacy leak to third-party apps
-        if (callback->pingBinder() != OK) {
-            LOGE("[TX_ID: %" PRIu64 "] Interceptor DEAD. Blocking to prevent attestation leak.", tx_id);
-            result = DEAD_OBJECT;
-            return true;
-        }
-        LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed (not dead). Forwarding.", tx_id);
-        return false;
+        LOGE("[TX_ID: %" PRIu64 "] Pre-transaction callback failed; blocking original transaction.", tx_id);
+        result = DEAD_OBJECT;
+        return true;
     }
 
+    if (pre_resp.dataAvail() < sizeof(int32_t)) {
+        LOGE("[TX_ID: %" PRIu64 "] Pre-transaction callback returned an empty action.", tx_id);
+        result = DEAD_OBJECT;
+        return true;
+    }
     int32_t action = pre_resp.readInt32();
 
     // ACTION: Override Reply immediately and skip the real transaction
     if (action == intercept::kActionOverrideReply) {
-        if (reply) {
-            result = pre_resp.readInt32(); // Read status code from response
-            size_t size = pre_resp.readUint64();
-            reply->setDataSize(0);
-            reply->appendFrom(&pre_resp, pre_resp.dataPosition(), size);
+        if (!reply || pre_resp.dataAvail() < sizeof(int32_t) + sizeof(uint64_t)) {
+            result = DEAD_OBJECT;
+            return true;
         }
+        result = pre_resp.readInt32(); // Read status code from response
+        size_t size = pre_resp.readUint64();
+        if (size > pre_resp.dataAvail()) {
+            result = DEAD_OBJECT;
+            return true;
+        }
+        reply->setDataSize(0);
+        reply->appendFrom(&pre_resp, pre_resp.dataPosition(), size);
         return true; // Handled
     }
 
@@ -682,11 +696,23 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
     // ACTION: Modify the transaction's request data before forwarding
     Parcel final_request;
     if (action == intercept::kActionOverrideData) {
+        if (pre_resp.dataAvail() < sizeof(uint64_t)) {
+            result = DEAD_OBJECT;
+            return true;
+        }
         size_t size = pre_resp.readUint64();
+        if (size > pre_resp.dataAvail()) {
+            result = DEAD_OBJECT;
+            return true;
+        }
         final_request.appendFrom(&pre_resp, pre_resp.dataPosition(), size);
-    } else {
+    } else if (action == intercept::kActionContinue) {
         // Default (kActionContinue): Use original data
         final_request.appendFrom(&request, 0, request.dataSize());
+    } else {
+        LOGE("[TX_ID: %" PRIu64 "] Invalid pre-transaction action %d; blocking.", tx_id, action);
+        result = DEAD_OBJECT;
+        return true;
     }
 
     // --- Phase 2: Execute Original Transaction ---
@@ -705,14 +731,34 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
     }
 
     status_t post_status = callback->transact(intercept::kPostTransact, post_req, &post_resp);
-    if (post_status == OK) {
-        int32_t post_action = post_resp.readInt32();
-        if (post_action == intercept::kActionOverrideReply && reply) {
-            result = post_resp.readInt32(); // Read new status
-            size_t new_size = post_resp.readUint64();
-            reply->setDataSize(0); // Clear original reply
-            VALIDATE_STATUS(tx_id, reply->appendFrom(&post_resp, post_resp.dataPosition(), new_size));
+    if (post_status != OK || post_resp.dataAvail() < sizeof(int32_t)) {
+        LOGE("[TX_ID: %" PRIu64 "] Post-transaction callback failed; blocking original reply.", tx_id);
+        if (reply) reply->setDataSize(0);
+        result = DEAD_OBJECT;
+        return true;
+    }
+
+    int32_t post_action = post_resp.readInt32();
+    if (post_action == intercept::kActionOverrideReply) {
+        if (!reply || post_resp.dataAvail() < sizeof(int32_t) + sizeof(uint64_t)) {
+            if (reply) reply->setDataSize(0);
+            result = DEAD_OBJECT;
+            return true;
         }
+        result = post_resp.readInt32(); // Read new status
+        size_t new_size = post_resp.readUint64();
+        if (new_size > post_resp.dataAvail()) {
+            reply->setDataSize(0);
+            result = DEAD_OBJECT;
+            return true;
+        }
+        reply->setDataSize(0); // Clear original reply
+        VALIDATE_STATUS(tx_id, reply->appendFrom(&post_resp, post_resp.dataPosition(), new_size));
+    } else if (post_action != intercept::kActionSkipTransaction) {
+        LOGE("[TX_ID: %" PRIu64 "] Invalid post-transaction action %d; blocking.", tx_id, post_action);
+        if (reply) reply->setDataSize(0);
+        result = DEAD_OBJECT;
+        return true;
     }
 
     return true; // We handled the flow, even if we just forwarded it

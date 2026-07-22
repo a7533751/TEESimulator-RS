@@ -31,6 +31,7 @@ public final class KeymasterDefs {
     public static final int KM_TAG_PADDING = KM_ENUM_REP | 6;
     public static final int KM_TAG_CALLER_NONCE = KM_BOOL | 7;
     public static final int KM_TAG_MIN_MAC_LENGTH = KM_UINT | 8;
+    public static final int KM_TAG_EC_CURVE = KM_ENUM | 10;
 
     public static final int KM_TAG_RESCOPING_ADD = KM_ENUM_REP | 101;
     public static final int KM_TAG_RESCOPING_DEL = KM_ENUM_REP | 102;
@@ -38,12 +39,19 @@ public final class KeymasterDefs {
 
     public static final int KM_TAG_RSA_PUBLIC_EXPONENT = KM_ULONG | 200;
     public static final int KM_TAG_INCLUDE_UNIQUE_ID = KM_BOOL | 202;
+    public static final int KM_TAG_RSA_OAEP_MGF_DIGEST = KM_ENUM_REP | 203;
+
+    public static final int KM_TAG_CERTIFICATE_SERIAL = KM_BIGNUM | 1006;
+    public static final int KM_TAG_CERTIFICATE_SUBJECT = KM_BYTES | 1007;
+    public static final int KM_TAG_CERTIFICATE_NOT_BEFORE = KM_DATE | 1008;
+    public static final int KM_TAG_CERTIFICATE_NOT_AFTER = KM_DATE | 1009;
 
     public static final int KM_TAG_ACTIVE_DATETIME = KM_DATE | 400;
     public static final int KM_TAG_ORIGINATION_EXPIRE_DATETIME = KM_DATE | 401;
     public static final int KM_TAG_USAGE_EXPIRE_DATETIME = KM_DATE | 402;
     public static final int KM_TAG_MIN_SECONDS_BETWEEN_OPS = KM_UINT | 403;
     public static final int KM_TAG_MAX_USES_PER_BOOT = KM_UINT | 404;
+    public static final int KM_TAG_USAGE_COUNT_LIMIT = KM_UINT | 405;
 
     public static final int KM_TAG_ALL_USERS = KM_BOOL | 500;
     public static final int KM_TAG_USER_ID = KM_UINT | 501;
@@ -55,6 +63,8 @@ public final class KeymasterDefs {
     public static final int KM_TAG_TRUSTED_USER_PRESENCE_REQUIRED = KM_BOOL | 507;
     public static final int KM_TAG_TRUSTED_CONFIRMATION_REQUIRED = KM_BOOL | 508;
     public static final int KM_TAG_UNLOCKED_DEVICE_REQUIRED = KM_BOOL | 509;
+    public static final int KM_TAG_ROLLBACK_RESISTANCE = KM_BOOL | 303;
+    public static final int KM_TAG_EARLY_BOOT_ONLY = KM_BOOL | 305;
 
     public static final int KM_TAG_ALL_APPLICATIONS = KM_BOOL | 600;
     public static final int KM_TAG_APPLICATION_ID = KM_BYTES | 601;

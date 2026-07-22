@@ -19,6 +19,8 @@ import java.security.KeyPair
 import java.security.cert.Certificate
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
+import javax.security.auth.x500.X500Principal
+import org.bouncycastle.asn1.x500.X500Name
 import org.matrix.TEESimulator.attestation.AttestationBuilder
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
@@ -388,11 +390,35 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
 internal data class LegacyKeygenParameters(
     val algorithm: Int,
     val keySize: Int,
+    val ecCurve: Int?,
+    val ecCurveName: String?,
+    val blockMode: List<Int>,
+    val padding: List<Int>,
     val purpose: List<Int>,
     val digest: List<Int>,
-    val certificateNotBefore: Date?,
     val rsaPublicExponent: BigInteger?,
-    val ecCurveName: String?, // Derived from keySize
+    val certificateSerial: BigInteger?,
+    val certificateSubject: X500Name?,
+    val certificateNotBefore: Date?,
+    val certificateNotAfter: Date?,
+    val activeDateTime: Date?,
+    val originationExpireDateTime: Date?,
+    val usageExpireDateTime: Date?,
+    val usageCountLimit: Int?,
+    val maxUsesPerBoot: Int?,
+    val callerNonce: Boolean?,
+    val nonce: ByteArray?,
+    val origin: Int?,
+    val unlockedDeviceRequired: Boolean?,
+    val includeUniqueId: Boolean?,
+    val rollbackResistance: Boolean?,
+    val earlyBootOnly: Boolean?,
+    val allowWhileOnBody: Boolean?,
+    val trustedUserPresenceRequired: Boolean?,
+    val trustedConfirmationRequired: Boolean?,
+    val noAuthRequired: Boolean?,
+    val minMacLength: Int?,
+    val rsaOaepMgfDigest: List<Int>,
 ) {
     // The challenge is provided in a separate transaction (attestKey), so it must be mutable.
     var attestationChallenge: ByteArray? = null
@@ -407,18 +433,18 @@ internal data class LegacyKeygenParameters(
         return KeyMintAttestation(
             keySize = this.keySize,
             algorithm = this.algorithm,
-            ecCurve = 0,
+            ecCurve = this.ecCurve,
             ecCurveName = this.ecCurveName ?: "",
-            origin = null,
-            blockMode = listOf<Int>(),
-            padding = listOf<Int>(),
+            origin = this.origin,
+            blockMode = this.blockMode,
+            padding = this.padding,
             purpose = this.purpose,
             digest = this.digest,
             rsaPublicExponent = this.rsaPublicExponent,
-            certificateSerial = null, // Not provided in legacy generateKey
-            certificateSubject = null, // Not provided in legacy generateKey
+            certificateSerial = this.certificateSerial,
+            certificateSubject = this.certificateSubject,
             certificateNotBefore = this.certificateNotBefore,
-            certificateNotAfter = null, // Not provided in legacy generateKey
+            certificateNotAfter = this.certificateNotAfter,
             attestationChallenge = this.attestationChallenge,
             // Device identifiers are not passed in legacy args;
             // AttestationBuilder will fetch them from system properties.
@@ -431,54 +457,174 @@ internal data class LegacyKeygenParameters(
             manufacturer = null,
             model = null,
             secondImei = null,
-            activeDateTime = null,
-            originationExpireDateTime = null,
-            usageExpireDateTime = null,
-            usageCountLimit = null,
-            callerNonce = null,
-            nonce = null,
-            unlockedDeviceRequired = null,
-            includeUniqueId = null,
-            rollbackResistance = null,
-            earlyBootOnly = null,
-            allowWhileOnBody = null,
-            trustedUserPresenceRequired = null,
-            trustedConfirmationRequired = null,
-            noAuthRequired = null,
-            maxUsesPerBoot = null,
+            activeDateTime = this.activeDateTime,
+            originationExpireDateTime = this.originationExpireDateTime,
+            usageExpireDateTime = this.usageExpireDateTime,
+            usageCountLimit = this.usageCountLimit,
+            callerNonce = this.callerNonce,
+            nonce = this.nonce,
+            unlockedDeviceRequired = this.unlockedDeviceRequired,
+            includeUniqueId = this.includeUniqueId,
+            rollbackResistance = this.rollbackResistance,
+            earlyBootOnly = this.earlyBootOnly,
+            allowWhileOnBody = this.allowWhileOnBody,
+            trustedUserPresenceRequired = this.trustedUserPresenceRequired,
+            trustedConfirmationRequired = this.trustedConfirmationRequired,
+            noAuthRequired = this.noAuthRequired,
+            maxUsesPerBoot = this.maxUsesPerBoot,
             maxBootLevel = null,
-            minMacLength = null,
-            rsaOaepMgfDigest = emptyList(),
+            minMacLength = this.minMacLength,
+            rsaOaepMgfDigest = this.rsaOaepMgfDigest,
         )
     }
 
     companion object {
-        /** Factory method to create an instance from a [KeymasterArguments] object. */
-        fun fromKeymasterArguments(args: KeymasterArguments): LegacyKeygenParameters {
-            val algorithm = args.getEnum(KeymasterDefs.KM_TAG_ALGORITHM, 0)
-            val keySize = args.getUnsignedInt(KeymasterDefs.KM_TAG_KEY_SIZE, 0).toInt()
+        /** Factory method for generation arguments or merged key characteristics. */
+        fun fromKeymasterArguments(vararg sources: KeymasterArguments): LegacyKeygenParameters {
+            require(sources.isNotEmpty()) { "At least one KeymasterArguments source is required" }
+
+            val rawEcCurve = firstEnum(sources, KeymasterDefs.KM_TAG_EC_CURVE)
+            val algorithm = firstEnum(sources, KeymasterDefs.KM_TAG_ALGORITHM) ?: 0
+            val keySize =
+                firstUnsignedInt(sources, KeymasterDefs.KM_TAG_KEY_SIZE)
+                    ?: deriveEcKeySize(rawEcCurve)
+            val ecCurve =
+                if (algorithm == KeymasterDefs.KM_ALGORITHM_EC) {
+                    rawEcCurve ?: deriveEcCurve(keySize)
+                } else {
+                    null
+                }
+            val certificateNotBefore =
+                firstDate(sources, KeymasterDefs.KM_TAG_CERTIFICATE_NOT_BEFORE)
+                    ?: firstDate(sources, KeymasterDefs.KM_TAG_ACTIVE_DATETIME)
 
             return LegacyKeygenParameters(
                 algorithm = algorithm,
                 keySize = keySize,
-                purpose = args.getEnums(KeymasterDefs.KM_TAG_PURPOSE),
-                digest = args.getEnums(KeymasterDefs.KM_TAG_DIGEST),
-                certificateNotBefore = args.getDate(KeymasterDefs.KM_TAG_ACTIVE_DATETIME, Date()),
+                ecCurve = ecCurve,
+                ecCurveName = ecCurve?.let(::deriveEcCurveName),
+                blockMode = allEnums(sources, KeymasterDefs.KM_TAG_BLOCK_MODE),
+                padding = allEnums(sources, KeymasterDefs.KM_TAG_PADDING),
+                purpose = allEnums(sources, KeymasterDefs.KM_TAG_PURPOSE),
+                digest = allEnums(sources, KeymasterDefs.KM_TAG_DIGEST),
                 rsaPublicExponent =
-                    if (algorithm == KeymasterDefs.KM_ALGORITHM_RSA) getRsaExponent(args) else null,
-                ecCurveName =
-                    if (algorithm == KeymasterDefs.KM_ALGORITHM_EC) deriveEcCurveName(keySize)
-                    else null,
+                    if (algorithm == KeymasterDefs.KM_ALGORITHM_RSA) {
+                        sources.firstNotNullOfOrNull { args -> getRsaExponent(args) }
+                    } else null,
+                certificateSerial =
+                    firstBytes(sources, KeymasterDefs.KM_TAG_CERTIFICATE_SERIAL)
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { BigInteger(1, it) },
+                certificateSubject =
+                    firstBytes(sources, KeymasterDefs.KM_TAG_CERTIFICATE_SUBJECT)?.let {
+                        runCatching { X500Name(X500Principal(it).name) }.getOrNull()
+                    },
+                certificateNotBefore = certificateNotBefore,
+                certificateNotAfter = firstDate(sources, KeymasterDefs.KM_TAG_CERTIFICATE_NOT_AFTER),
+                activeDateTime = firstDate(sources, KeymasterDefs.KM_TAG_ACTIVE_DATETIME),
+                originationExpireDateTime =
+                    firstDate(sources, KeymasterDefs.KM_TAG_ORIGINATION_EXPIRE_DATETIME),
+                usageExpireDateTime = firstDate(sources, KeymasterDefs.KM_TAG_USAGE_EXPIRE_DATETIME),
+                usageCountLimit = firstUnsignedInt(sources, KeymasterDefs.KM_TAG_USAGE_COUNT_LIMIT),
+                maxUsesPerBoot = firstUnsignedInt(sources, KeymasterDefs.KM_TAG_MAX_USES_PER_BOOT),
+                callerNonce = firstBoolean(sources, KeymasterDefs.KM_TAG_CALLER_NONCE),
+                nonce = firstBytes(sources, KeymasterDefs.KM_TAG_NONCE),
+                origin = firstEnum(sources, KeymasterDefs.KM_TAG_ORIGIN),
+                unlockedDeviceRequired =
+                    firstBoolean(sources, KeymasterDefs.KM_TAG_UNLOCKED_DEVICE_REQUIRED),
+                includeUniqueId = firstBoolean(sources, KeymasterDefs.KM_TAG_INCLUDE_UNIQUE_ID),
+                rollbackResistance =
+                    firstBoolean(sources, KeymasterDefs.KM_TAG_ROLLBACK_RESISTANCE)
+                        ?: firstBoolean(sources, KeymasterDefs.KM_TAG_ROLLBACK_RESISTANT),
+                earlyBootOnly = firstBoolean(sources, KeymasterDefs.KM_TAG_EARLY_BOOT_ONLY),
+                allowWhileOnBody = firstBoolean(sources, KeymasterDefs.KM_TAG_ALLOW_WHILE_ON_BODY),
+                trustedUserPresenceRequired =
+                    firstBoolean(sources, KeymasterDefs.KM_TAG_TRUSTED_USER_PRESENCE_REQUIRED),
+                trustedConfirmationRequired =
+                    firstBoolean(sources, KeymasterDefs.KM_TAG_TRUSTED_CONFIRMATION_REQUIRED),
+                noAuthRequired = firstBoolean(sources, KeymasterDefs.KM_TAG_NO_AUTH_REQUIRED),
+                minMacLength = firstUnsignedInt(sources, KeymasterDefs.KM_TAG_MIN_MAC_LENGTH),
+                rsaOaepMgfDigest =
+                    allEnums(sources, KeymasterDefs.KM_TAG_RSA_OAEP_MGF_DIGEST),
             )
         }
 
-        private fun deriveEcCurveName(keySize: Int): String =
+        private fun deriveEcCurve(keySize: Int): Int? =
             when (keySize) {
-                224 -> "secp224r1"
-                256 -> "secp256r1"
-                384 -> "secp384r1"
-                521 -> "secp521r1"
-                else -> "secp256r1" // Default fallback
+                224 -> 0
+                256 -> 1
+                384 -> 2
+                521 -> 3
+                else -> null
+            }
+
+        private fun deriveEcKeySize(curve: Int?): Int =
+            when (curve) {
+                0 -> 224
+                1 -> 256
+                2 -> 384
+                3 -> 521
+                else -> 0
+            }
+
+        private fun deriveEcCurveName(curve: Int): String =
+            when (curve) {
+                0 -> "secp224r1"
+                1 -> "secp256r1"
+                2 -> "secp384r1"
+                3 -> "secp521r1"
+                else -> "secp256r1"
+            }
+
+        private fun hasTag(args: KeymasterArguments, tag: Int): Boolean =
+            runCatching { args.containsTag(tag) }.getOrDefault(false)
+
+        private fun firstEnum(sources: Array<out KeymasterArguments>, tag: Int): Int? =
+            sources.firstNotNullOfOrNull { args ->
+                if (!hasTag(args, tag)) null
+                else runCatching { args.getEnum(tag, 0) }.getOrNull()
+            }
+
+        private fun allEnums(sources: Array<out KeymasterArguments>, tag: Int): List<Int> =
+            sources.flatMap { args ->
+                if (!hasTag(args, tag)) emptyList()
+                else runCatching { args.getEnums(tag) }.getOrDefault(emptyList())
+            }.distinct()
+
+        private fun firstUnsignedInt(
+            sources: Array<out KeymasterArguments>,
+            tag: Int,
+        ): Int? =
+            sources.firstNotNullOfOrNull { args ->
+                if (!hasTag(args, tag)) null
+                else runCatching { args.getUnsignedInt(tag, 0).toInt() }.getOrNull()
+            }
+
+        private fun firstDate(
+            sources: Array<out KeymasterArguments>,
+            tag: Int,
+        ): Date? =
+            sources.firstNotNullOfOrNull { args ->
+                if (!hasTag(args, tag)) null
+                else runCatching { args.getDate(tag, Date(0)) }.getOrNull()
+            }
+
+        private fun firstBoolean(
+            sources: Array<out KeymasterArguments>,
+            tag: Int,
+        ): Boolean? =
+            sources.firstNotNullOfOrNull { args ->
+                if (!hasTag(args, tag)) null
+                else runCatching { args.getBoolean(tag) }.getOrNull()
+            }
+
+        private fun firstBytes(
+            sources: Array<out KeymasterArguments>,
+            tag: Int,
+        ): ByteArray? =
+            sources.firstNotNullOfOrNull { args ->
+                if (!hasTag(args, tag)) null
+                else runCatching { args.getBytes(tag, ByteArray(0)) }.getOrNull()
             }
 
         /**

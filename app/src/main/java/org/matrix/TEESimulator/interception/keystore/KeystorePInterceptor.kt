@@ -5,6 +5,7 @@ import android.os.IBinder
 import android.os.Parcel
 import android.security.IKeystoreService
 import android.security.KeyStore
+import android.security.keymaster.KeyCharacteristics
 import android.security.keymaster.KeymasterArguments
 import android.security.keymaster.KeymasterBlob
 import android.security.keymaster.KeymasterCertificateChain
@@ -14,6 +15,8 @@ import java.security.KeyPair
 import java.security.cert.Certificate
 import java.security.spec.X509EncodedKeySpec
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.InterceptorUtils.extractAlias
@@ -43,13 +46,27 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
     private val exportKeyTransaction by lazy {
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "exportKey")
     }
+    private val getKeyCharacteristicsTransaction by lazy {
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "getKeyCharacteristics")
+    }
 
     private val keygenParameters =
         ConcurrentHashMap<KeyIdentifier, LegacyKeygenParameters>()
+    private val targetedAttestations = ConcurrentHashMap<Long, Int>()
+    private val uidDelegationLock = ReentrantLock()
 
     override val serviceName = "android.security.keystore"
     override val processName = "keystore"
     override val injectionCommand = "exec ./inject `pidof keystore` libTEESimulator.so entry"
+
+    override val interceptedCodes: IntArray by lazy {
+        intArrayOf(
+            generateKeyTransaction,
+            attestKeyTransaction,
+            exportKeyTransaction,
+            getKeyCharacteristicsTransaction,
+        )
+    }
 
     override fun onPreTransact(
         txId: Long,
@@ -60,7 +77,10 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        if (!isTargeted(callingUid)) return TransactionResult.ContinueAndSkipPost
+        val configUid =
+            ConfigurationManager.resolveTargetUid(callingUid, callingPid)
+                ?: return TransactionResult.ContinueAndSkipPost
+        if (code == attestKeyTransaction) targetedAttestations[txId] = configUid
 
         return try {
             when (code) {
@@ -75,9 +95,11 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
             if (code == attestKeyTransaction) TransactionResult.Continue
             else TransactionResult.ContinueAndSkipPost
         } catch (t: Throwable) {
-            // A malformed or vendor-specific transaction must always reach the real Keystore.
-            SystemLogger.warning("Pie transaction inspection failed; forwarding unchanged.", t)
-            TransactionResult.ContinueAndSkipPost
+            SystemLogger.warning("Pie transaction inspection failed; preserving post handling.", t)
+            // Keep the post hook for attestKey so malformed requests still fail closed instead of
+            // returning the vendor certificate chain unchanged.
+            if (code == attestKeyTransaction) TransactionResult.Continue
+            else TransactionResult.ContinueAndSkipPost
         }
     }
 
@@ -92,9 +114,11 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
         reply: Parcel?,
         resultCode: Int,
     ): TransactionResult {
-        if (code != attestKeyTransaction || reply == null || !isTargeted(callingUid)) {
+        if (code != attestKeyTransaction) {
             return TransactionResult.SkipTransaction
         }
+        val configUid = targetedAttestations.remove(txId) ?: return TransactionResult.SkipTransaction
+        if (reply == null) return TransactionResult.SkipTransaction
 
         return runCatching {
             reply.setDataPosition(0)
@@ -117,7 +141,7 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
                         val patchedChain =
                             AttestationPatcher.patchCertificateChain(
                                 originalChain.toTypedArray(),
-                                callingUid,
+                                configUid,
                             )
                         if (isReplacementChain(originalChain, patchedChain.asList())) {
                             SystemLogger.info(
@@ -135,7 +159,7 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
                     }
 
                     val generatedChain =
-                        generateFallbackChain(request, callingUid, callingPid)
+                        generateFallbackChain(request, callingUid, configUid, callingPid)
                             ?: return@runCatching failClosedAttestation(
                                 txId,
                                 callingUid,
@@ -148,7 +172,7 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
                 }
                 QTI_ATTESTATION_FAILURE -> {
                     val generatedChain =
-                        generateFallbackChain(request, callingUid, callingPid)
+                        generateFallbackChain(request, callingUid, configUid, callingPid)
                             ?: return@runCatching failClosedAttestation(
                                 txId,
                                 callingUid,
@@ -169,9 +193,6 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
             createAttestationErrorReply(QTI_ATTESTATION_FAILURE)
         }
     }
-
-    private fun isTargeted(uid: Int): Boolean =
-        ConfigurationManager.shouldPatch(uid) || ConfigurationManager.shouldGenerate(uid)
 
     private fun rememberGenerateRequest(uid: Int, source: Parcel) {
         source.setDataPosition(0)
@@ -224,48 +245,92 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
     private fun generateFallbackChain(
         request: AttestationRequest,
         uid: Int,
+        configUid: Int,
         pid: Int,
     ): List<Certificate>? {
         val alias = extractAlias(request.rawAlias)
-        val params = keygenParameters[KeyIdentifier(uid, alias)] ?: run {
+        val keyId = KeyIdentifier(uid, alias)
+        val params = loadKeyParameters(keyId, request.rawAlias, pid) ?: run {
             SystemLogger.warning("No captured Pie key parameters for uid=$uid alias=$alias")
             return null
         }
-        params.attestationChallenge =
+        val challenge =
             request.arguments.getBytes(
                 KeymasterDefs.KM_TAG_ATTESTATION_CHALLENGE,
                 ByteArray(0),
             )
+        val attestation = params.toKeyMintAttestation().copy(attestationChallenge = challenge)
 
         val publicKey = exportPublicKey(request.rawAlias, uid, pid) ?: return null
         return CertificateGenerator.generateCertificateChain(
-            uid,
+            configUid,
             KeyPair(publicKey, null),
             null,
-            params.toKeyMintAttestation(),
+            attestation,
             1,
         )
     }
 
+    private fun loadKeyParameters(
+        keyId: KeyIdentifier,
+        rawAlias: String,
+        pid: Int,
+    ): LegacyKeygenParameters? {
+        val characteristics = KeyCharacteristics()
+        val empty = KeymasterBlob(ByteArray(0))
+        val resultCode =
+            uidDelegationLock.withLock {
+                if (!prepareCallingUid(keyId.uid, pid, getKeyCharacteristicsTransaction)) {
+                    return@withLock null
+                }
+                try {
+                    KeyStore.getInstance().getKeyCharacteristics(
+                        rawAlias,
+                        empty,
+                        empty,
+                        keyId.uid,
+                        characteristics,
+                    )
+                } finally {
+                    clearCallingUid()
+                }
+            }
+        if (resultCode == KeyStore.NO_ERROR) {
+            val sources =
+                listOfNotNull(characteristics.hwEnforced, characteristics.swEnforced)
+                    .toTypedArray()
+            if (sources.isNotEmpty()) {
+                return runCatching {
+                        LegacyKeygenParameters.fromKeymasterArguments(*sources)
+                    }
+                    .onSuccess { keygenParameters[keyId] = it }
+                    .getOrNull()
+            }
+        }
+        return keygenParameters[keyId]
+    }
+
     private fun exportPublicKey(rawAlias: String, uid: Int, pid: Int) = runCatching {
         val empty = KeymasterBlob(ByteArray(0))
-        if (!prepareCallingUid(uid, pid, exportKeyTransaction)) {
-            SystemLogger.warning(
-                "Cannot prepare UID delegation for exportKey (uid=$uid pid=$pid code=$exportKeyTransaction)"
-            )
-            return@runCatching null
-        }
-        val result = try {
-            KeyStore.getInstance().exportKey(
-                rawAlias,
-                KeymasterDefs.KM_KEY_FORMAT_X509,
-                empty,
-                empty,
-                uid,
-            )
-        } finally {
-            clearCallingUid()
-        }
+        val result = uidDelegationLock.withLock {
+            if (!prepareCallingUid(uid, pid, exportKeyTransaction)) {
+                SystemLogger.warning(
+                    "Cannot prepare UID delegation for exportKey (uid=$uid pid=$pid code=$exportKeyTransaction)"
+                )
+                return@withLock null
+            }
+            try {
+                KeyStore.getInstance().exportKey(
+                    rawAlias,
+                    KeymasterDefs.KM_KEY_FORMAT_X509,
+                    empty,
+                    empty,
+                    uid,
+                )
+            } finally {
+                clearCallingUid()
+            }
+        } ?: return@runCatching null
         if (result == null || result.resultCode != KeyStore.NO_ERROR) return@runCatching null
         val algorithm = if (result.exportData.firstOrNull() == 0x30.toByte()) {
             // X.509 SubjectPublicKeyInfo is self-describing; try EC first, then RSA.

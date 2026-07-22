@@ -9,6 +9,10 @@ AUTO-mode key attestation now forges plain attestation from the keybox instead o
 - Malformed or unpatchable successful replies fall back to hardware-public-key synthesis. If both
   replacement paths fail, the target receives an attestation error instead of the real unlocked
   certificate chain.
+- Pie fallback restores key characteristics for pre-existing aliases, preserves EC/RSA authorization
+  fields, and serializes the delegated export path so concurrent requests cannot mix caller UIDs.
+- Isolated callers are associated with configured packages through their Binder PID when possible;
+  callback and parcel failures now block the original attestation response instead of forwarding it.
 
 ### Detection coverage
 - AUTO dispatch probed the device with `checkTeeFunctionality`, which only proves the TEE can mint one EC key. It says nothing about RSA attestation, device-ID attestation, or whether a patched chain survives RSA verify. Plain attestation requests (attest-key OFF, challenge present) were routed to PATCH and deferred to hardware, so devices that can't back that surfaced KeyAttestation reds: `ATTESTATION_KEYS_NOT_PROVISIONED` (-49) and `BLOCK_TYPE_IS_NOT_01`.

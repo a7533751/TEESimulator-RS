@@ -380,6 +380,57 @@ object ConfigurationManager {
         }
     }
 
+    /**
+     * Resolves the configuration UID for a Binder caller. Isolated processes do not have a package
+     * mapping of their own, so use their process name to associate them with a configured package and
+     * resolve that package's real UID. Returning the isolated UID as a last resort keeps the caller
+     * targeted and lets the attestation path fail closed if PackageManager cannot resolve ownership.
+     */
+    fun resolveTargetUid(uid: Int, pid: Int): Int? {
+        val directPackages = getPackagesForUid(uid)
+        if (directPackages.any { packageModes.containsKey(it) }) return uid
+
+        val processName = readProcessName(pid) ?: return null
+        val packageName =
+            packageModes.keys.firstOrNull { processName == it || processName.startsWith("$it:") }
+                ?: return null
+        return resolvePackageUid(packageName, uid / 100000) ?: uid
+    }
+
+    private fun readProcessName(pid: Int): String? {
+        if (pid <= 0) return null
+        return runCatching {
+                val bytes = File("/proc/$pid/cmdline").readBytes()
+                val end = bytes.indexOf(0)
+                String(bytes, 0, if (end >= 0) end else bytes.size, Charsets.UTF_8)
+            }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun resolvePackageUid(packageName: String, userId: Int): Int? {
+        val packageManager = getPackageManager() ?: return null
+        return runCatching {
+                val method =
+                    packageManager.javaClass.methods.firstOrNull {
+                        it.name == "getPackageUid" &&
+                            it.parameterTypes.size == 3 &&
+                            it.parameterTypes[0] == String::class.java &&
+                            it.parameterTypes[2] == Int::class.javaPrimitiveType
+                    } ?: return@runCatching null
+                val flags =
+                    if (method.parameterTypes[1] == Long::class.javaPrimitiveType) 0L else 0
+                (method.invoke(packageManager, packageName, flags, userId) as Number).toInt()
+            }
+            .onFailure {
+                SystemLogger.warning(
+                    "Failed to resolve configured package UID for $packageName",
+                    it,
+                )
+            }
+            .getOrNull()
+    }
+
     /** Waits for a system service to become available, with retries. */
     private fun waitForSystemService(name: String): IBinder? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

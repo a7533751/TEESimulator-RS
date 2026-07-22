@@ -2,6 +2,7 @@ package android.security;
 
 import android.security.keymaster.ExportResult;
 import android.security.keymaster.KeymasterBlob;
+import android.security.keymaster.KeyCharacteristics;
 
 public class KeyStore {
     public static final int CANNOT_ATTEST_IDS = -66;
@@ -43,6 +44,15 @@ public class KeyStore {
 
     public ExportResult exportKey(
             String alias, int format, KeymasterBlob clientId, KeymasterBlob appId, int uid) {
+        throw new UnsupportedOperationException("STUB!");
+    }
+
+    public int getKeyCharacteristics(
+            String alias,
+            KeymasterBlob clientId,
+            KeymasterBlob appId,
+            int uid,
+            KeyCharacteristics outCharacteristics) {
         throw new UnsupportedOperationException("STUB!");
     }
 }
