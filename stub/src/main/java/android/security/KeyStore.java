@@ -42,6 +42,10 @@ public class KeyStore {
 
     public static KeyStore getInstance() { throw new UnsupportedOperationException("STUB!"); }
 
+    public byte[] get(String key, int uid) {
+        throw new UnsupportedOperationException("STUB!");
+    }
+
     public ExportResult exportKey(
             String alias, int format, KeymasterBlob clientId, KeymasterBlob appId, int uid) {
         throw new UnsupportedOperationException("STUB!");

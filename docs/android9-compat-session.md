@@ -29,6 +29,11 @@ This is an attestation compatibility layer, not a repair of OEM TEE provisioning
   the original leaf public key and attestation parameters, then rebuild the chain with the configured
   keybox.
 - Added synthesis fallback for malformed or unpatchable successful chains.
+- Added synthesis attempts for other negative QTI `attestKey` results; the original error is
+  preserved if no valid replacement can be produced.
+- Added stored `USRCERT_` public-key recovery when direct `exportKey` is unavailable.
+- Added EC/RSA cross-algorithm keybox signing and keybox integrity preflight.
+- Preserved requested legacy device-ID attestation fields when a QTI error is synthesized.
 - Fail closed for targeted Pie attestation when neither patching nor synthesis can replace a
   successful OEM reply, preventing the real chain from being returned unchanged.
 - Added Android 9 OS/attestation version fallbacks.

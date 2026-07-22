@@ -3,6 +3,9 @@ package org.matrix.TEESimulator.pki
 import android.security.keystore.KeyProperties
 import java.io.File
 import java.io.StringReader
+import java.security.KeyPair
+import java.security.cert.Certificate
+import java.security.cert.X509Certificate
 import java.security.interfaces.ECPrivateKey
 import java.security.interfaces.RSAPrivateKey
 import java.util.concurrent.ConcurrentHashMap
@@ -57,6 +60,13 @@ object KeyBoxManager {
             "Fetching attestation key in $keyStoreFileName with $algorithm algorithm."
         )
         return keyMap[algorithm]
+    }
+
+    /** Retrieves any usable attestation key, preferring EC for cross-algorithm signing. */
+    fun getAnyAttestationKey(keyStoreFileName: String): KeyBox? {
+        val keyMap =
+            keyStoreCache.getOrPut(keyStoreFileName) { parseKeyStoreFile(keyStoreFileName) }
+        return keyMap[KeyProperties.KEY_ALGORITHM_EC] ?: keyMap.values.firstOrNull()
     }
 
     /**
@@ -180,6 +190,7 @@ object KeyBoxManager {
                                                         CertificateHelper.OperationResult.Success)
                                                     .data
                                             }
+                                        validateKeyBox(keyPair, certificates)
 
                                         // Derive the TRUE algorithm from the key object itself.
                                         // This is our source of truth.
@@ -233,5 +244,43 @@ object KeyBoxManager {
         }
         SystemLogger.info("Finished parsing, found ${foundKeys.size} valid keys.")
         return foundKeys
+    }
+
+    /** Rejects mismatched key material and malformed chains before an attestation request uses it. */
+    private fun validateKeyBox(
+        keyPair: KeyPair,
+        certificates: List<Certificate>,
+    ) {
+        require(certificates.isNotEmpty()) { "Keybox certificate chain is empty" }
+        val x509Chain =
+            certificates.mapIndexed { index, certificate ->
+                certificate as? X509Certificate
+                    ?: throw IllegalArgumentException("Keybox certificate #$index is not X.509")
+            }
+        require(keyPair.public.encoded.contentEquals(x509Chain.first().publicKey.encoded)) {
+            "Keybox private key does not match the first certificate"
+        }
+
+        for (index in 0 until x509Chain.lastIndex) {
+            x509Chain[index].verify(x509Chain[index + 1].publicKey)
+        }
+
+        val invalidDates =
+            x509Chain.mapIndexedNotNull { index, certificate ->
+                runCatching { certificate.checkValidity() }
+                    .exceptionOrNull()
+                    ?.let { "#$index serial=${certificate.serialNumber.toString(16)}: ${it.message}" }
+            }
+        if (invalidDates.isNotEmpty()) {
+            SystemLogger.warning(
+                "Keybox chain contains certificates outside their validity period: " +
+                    invalidDates.joinToString()
+            )
+        }
+
+        SystemLogger.info(
+            "Validated keybox chain: signer=${keyPair.private.algorithm}, depth=${x509Chain.size}, " +
+                "serials=${x509Chain.joinToString { it.serialNumber.toString(16) }}"
+        )
     }
 }

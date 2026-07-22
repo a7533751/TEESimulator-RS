@@ -173,9 +173,15 @@ object CertificateGenerator {
                 else -> throw IllegalArgumentException("Unsupported algorithm ID: $algorithm")
             }
         return KeyBoxManager.getAttestationKey(keyboxFile, algorithmName)
+            ?: KeyBoxManager.getAnyAttestationKey(keyboxFile)?.also {
+                SystemLogger.info(
+                    "No $algorithmName attestation key in $keyboxFile; using " +
+                        "${it.keyPair.private.algorithm} signer for the subject key."
+                )
+            }
             ?: throw android.os.ServiceSpecificException(
                 -75, // ATTESTATION_KEYS_NOT_PROVISIONED
-                "No attestation key for algorithm $algorithmName in $keyboxFile",
+                "No usable attestation key in $keyboxFile",
             )
     }
 

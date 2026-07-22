@@ -3,6 +3,7 @@ package org.matrix.TEESimulator.interception.keystore
 import android.annotation.SuppressLint
 import android.os.IBinder
 import android.os.Parcel
+import android.security.Credentials
 import android.security.IKeystoreService
 import android.security.KeyStore
 import android.security.keymaster.KeyCharacteristics
@@ -39,6 +40,9 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
 
     private val generateKeyTransaction by lazy {
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "generateKey")
+    }
+    private val getTransaction by lazy {
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "get")
     }
     private val attestKeyTransaction by lazy {
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "attestKey")
@@ -183,7 +187,27 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
                     )
                     createAttestationReply(generatedChain)
                 }
-                else -> TransactionResult.SkipTransaction
+                else -> {
+                    if (vendorResult < 0) {
+                        val generatedChain =
+                            generateFallbackChain(request, callingUid, configUid, callingPid)
+                        if (generatedChain != null) {
+                            SystemLogger.info(
+                                "[TX_ID: $txId] Replaced QTI Pie attestation error " +
+                                    "($vendorResult) by synthesis for uid=$callingUid alias=$alias"
+                            )
+                            createAttestationReply(generatedChain)
+                        } else {
+                            SystemLogger.warning(
+                                "[TX_ID: $txId] Could not replace QTI Pie attestation error " +
+                                    "($vendorResult); preserving the vendor error reply."
+                            )
+                            TransactionResult.SkipTransaction
+                        }
+                    } else {
+                        TransactionResult.SkipTransaction
+                    }
+                }
             }
         }.getOrElse {
             SystemLogger.warning(
@@ -259,9 +283,48 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
                 KeymasterDefs.KM_TAG_ATTESTATION_CHALLENGE,
                 ByteArray(0),
             )
-        val attestation = params.toKeyMintAttestation().copy(attestationChallenge = challenge)
+        val attestation =
+            params.toKeyMintAttestation()
+                .copy(
+                    attestationChallenge = challenge,
+                    brand =
+                        request.arguments.getOptionalBytes(
+                            KeymasterDefs.KM_TAG_ATTESTATION_ID_BRAND
+                        ),
+                    device =
+                        request.arguments.getOptionalBytes(
+                            KeymasterDefs.KM_TAG_ATTESTATION_ID_DEVICE
+                        ),
+                    product =
+                        request.arguments.getOptionalBytes(
+                            KeymasterDefs.KM_TAG_ATTESTATION_ID_PRODUCT
+                        ),
+                    serial =
+                        request.arguments.getOptionalBytes(
+                            KeymasterDefs.KM_TAG_ATTESTATION_ID_SERIAL
+                        ),
+                    imei =
+                        request.arguments.getOptionalBytes(
+                            KeymasterDefs.KM_TAG_ATTESTATION_ID_IMEI
+                        ),
+                    meid =
+                        request.arguments.getOptionalBytes(
+                            KeymasterDefs.KM_TAG_ATTESTATION_ID_MEID
+                        ),
+                    manufacturer =
+                        request.arguments.getOptionalBytes(
+                            KeymasterDefs.KM_TAG_ATTESTATION_ID_MANUFACTURER
+                        ),
+                    model =
+                        request.arguments.getOptionalBytes(
+                            KeymasterDefs.KM_TAG_ATTESTATION_ID_MODEL
+                        ),
+                )
 
-        val publicKey = exportPublicKey(request.rawAlias, uid, pid) ?: return null
+        val publicKey =
+            exportPublicKey(request.rawAlias, uid, pid)
+                ?: loadStoredCertificatePublicKey(alias, uid, pid)
+                ?: return null
         return CertificateGenerator.generateCertificateChain(
             configUid,
             KeyPair(publicKey, null),
@@ -342,6 +405,37 @@ object KeystorePInterceptor : AbstractKeystoreInterceptor() {
             KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(result.exportData))
         }
     }.getOrNull()
+
+    private fun loadStoredCertificatePublicKey(alias: String, uid: Int, pid: Int) = runCatching {
+        val encoded =
+            uidDelegationLock.withLock {
+                if (!prepareCallingUid(uid, pid, getTransaction)) {
+                    SystemLogger.warning(
+                        "Cannot prepare UID delegation for stored certificate lookup " +
+                            "(uid=$uid pid=$pid code=$getTransaction)"
+                    )
+                    return@withLock null
+                }
+                try {
+                    KeyStore.getInstance().get(Credentials.USER_CERTIFICATE + alias, uid)
+                } finally {
+                    clearCallingUid()
+                }
+            } ?: return@runCatching null
+
+        when (val parsed = CertificateHelper.toCertificate(encoded)) {
+            is CertificateHelper.OperationResult.Success -> {
+                SystemLogger.info(
+                    "Recovered Pie public key from stored certificate for uid=$uid alias=$alias"
+                )
+                parsed.data.publicKey
+            }
+            is CertificateHelper.OperationResult.Error -> null
+        }
+    }.getOrNull()
+
+    private fun KeymasterArguments.getOptionalBytes(tag: Int): ByteArray? =
+        if (containsTag(tag)) getBytes(tag, ByteArray(0)) else null
 
     private fun createAttestationReply(chain: List<Certificate>): TransactionResult {
         val certificateChain = KeymasterCertificateChain(chain.map { it.encoded })

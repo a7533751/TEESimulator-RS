@@ -2,8 +2,12 @@ package org.matrix.TEESimulator.attestation
 
 import android.security.keystore.KeyProperties
 import java.nio.charset.StandardCharsets
+import java.security.PrivateKey
 import java.security.cert.Certificate
 import java.security.cert.X509Certificate
+import java.security.interfaces.ECPrivateKey
+import java.security.interfaces.RSAPrivateKey
+import java.util.Date
 import org.bouncycastle.asn1.*
 import org.bouncycastle.asn1.x509.Extension
 import org.bouncycastle.cert.X509CertificateHolder
@@ -16,7 +20,6 @@ import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.pki.KeyBox
 import org.matrix.TEESimulator.pki.KeyBoxManager
 import org.matrix.TEESimulator.util.toHex
-import java.util.Date
 
 /**
  * Handles the modification (patching) of Android Key Attestation extensions within certificates.
@@ -67,7 +70,6 @@ object AttestationPatcher {
                         originalLeafHolder,
                         parsedAttestation,
                         keybox,
-                        originalLeaf.sigAlgName,
                         uid,
                         notBefore,
                         notAfter,
@@ -92,24 +94,11 @@ object AttestationPatcher {
     }
 
     /**
-     * Helper to normalize algorithm names for Bouncy Castle. Old Android versions might reports
-     * "SHA256WITHECDSA", but Bouncy Castle expects "SHA256withECDSA".
-     */
-    private fun normalizeSignatureAlgorithm(algoName: String): String {
-        // 1. Force uppercase to handle "sha256withecdsa"
-        // 2. Replace "WITH" with "with" to satisfy Bouncy Castle's naming convention
-        return algoName.uppercase().replace("WITH", "with")
-    }
-
-    /**
      * Creates a new leaf certificate with a modified attestation extension.
      *
      * @param originalLeafHolder A Bouncy Castle holder for the original leaf certificate.
      * @param parsedAttestation The parsed components of the original attestation.
      * @param keybox The KeyBox containing the new issuer certificate and signing key.
-     * @param sigAlgName The signature algorithm name (e.g., "SHA256withECDSA") from the original
-     *   certificate. This is required to ensure the new certificate is signed using a compatible
-     *   algorithm.
      * @param uid The UID of the application requesting the certificate.
      * @return A new [Certificate] object.
      */
@@ -117,7 +106,6 @@ object AttestationPatcher {
         originalLeafHolder: X509CertificateHolder,
         parsedAttestation: ParsedAttestation,
         keybox: KeyBox,
-        sigAlgName: String,
         uid: Int,
         notBefore: Date? = null,
         notAfter: Date? = null,
@@ -154,9 +142,9 @@ object AttestationPatcher {
             )
         }
 
-        // Sign the newly built certificate with the private key from our keybox.
+        // The leaf signature follows the actual keybox key, independently of the subject key type.
         val signer =
-            JcaContentSignerBuilder(normalizeSignatureAlgorithm(sigAlgName))
+            JcaContentSignerBuilder(signatureAlgorithmFor(keybox.keyPair.private))
                 .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                 .build(keybox.keyPair.private)
         val newCertificate = JcaX509CertificateConverter().getCertificate(builder.build(signer))
@@ -178,8 +166,8 @@ object AttestationPatcher {
      *     1. A simple key type like "RSA" or "EC".
      *     2. A full JCA signature algorithm name like "SHA256withRSA".
      *
-     * @return The [KeyBox] containing the appropriate key pair for signing.
-     * @throws IllegalArgumentException if no matching KeyBox can be found for the derived key type.
+     * @return The algorithm-matching [KeyBox], or another usable key when no match exists.
+     * @throws IllegalArgumentException if the configured file has no usable key.
      */
     private fun getKeyboxForUidAndAlgorithm(uid: Int, algorithm: String): KeyBox {
         val keyboxFile = ConfigurationManager.getKeyboxFileForUid(uid)
@@ -195,10 +183,26 @@ object AttestationPatcher {
             }
 
         return KeyBoxManager.getAttestationKey(keyboxFile, keyType)
+            ?: KeyBoxManager.getAnyAttestationKey(keyboxFile)?.also {
+                SystemLogger.info(
+                    "No '$keyType' attestation key in $keyboxFile for UID $uid; using " +
+                        "${it.keyPair.private.algorithm} signer."
+                )
+            }
             ?: throw IllegalArgumentException(
-                "No keybox found for UID $uid and algorithm '$keyType' (derived from input '$algorithm') in file $keyboxFile"
+                "No usable attestation key for UID $uid in file $keyboxFile"
             )
     }
+
+    private fun signatureAlgorithmFor(signingKey: PrivateKey): String =
+        when (signingKey) {
+            is ECPrivateKey -> "SHA256withECDSA"
+            is RSAPrivateKey -> "SHA256withRSA"
+            else ->
+                throw IllegalArgumentException(
+                    "Unsupported keybox signing key type: ${signingKey.algorithm}"
+                )
+        }
 
     /** Recursively formats an ASN1Primitive into a concise, readable string. */
     fun formatAsn1Primitive(obj: ASN1Encodable?): String {

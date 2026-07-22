@@ -11,6 +11,13 @@ AUTO-mode key attestation now forges plain attestation from the keybox instead o
   certificate chain.
 - Pie fallback restores key characteristics for pre-existing aliases, preserves EC/RSA authorization
   fields, and serializes the delegated export path so concurrent requests cannot mix caller UIDs.
+- Negative QTI attestation results beyond `-10003` now attempt synthesis before returning the
+  vendor error. If direct public-key export fails, Pie can recover the key from its stored
+  `USRCERT_` certificate.
+- EC-only keyboxes can sign RSA-subject leaves, and keybox key/chain consistency is checked before
+  use; certificate validity problems are logged explicitly.
+- Pie synthesis carries requested brand, device, product, serial, IMEI, MEID, manufacturer, and
+  model attestation fields instead of dropping them after a vendor device-ID error.
 - Isolated callers are associated with configured packages through their Binder PID when possible;
   callback and parcel failures now block the original attestation response instead of forwarding it.
 
