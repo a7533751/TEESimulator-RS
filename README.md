@@ -3,7 +3,7 @@
   <p align="center"><b>Full TEE Emulation for Rooted Android</b></p>
   <p align="center">
     <a href="https://github.com/Enginex0/TEESimulator-RS/actions/workflows/build.yml"><img src="https://github.com/Enginex0/TEESimulator-RS/actions/workflows/build.yml/badge.svg" alt="Build"></a>
-    <img src="https://img.shields.io/badge/Android-10%2B-green?logo=android" alt="Android 10+">
+    <img src="https://img.shields.io/badge/Android-9%2B-green?logo=android" alt="Android 9+">
     <a href="https://t.me/superpowers9"><img src="https://img.shields.io/badge/Telegram-community-blue?logo=telegram" alt="Telegram"></a>
   </p>
 </p>
@@ -15,7 +15,7 @@
 
 ## What It Does
 
-TEESimulator intercepts Binder IPC at the `ioctl` level inside the `keystore2` process and generates entire certificate chains from scratch, signed by your keybox, with correct attestation extensions. Apps that verify hardware attestation see a legitimate device.
+TEESimulator intercepts Binder IPC at the `ioctl` level inside the platform `keystore` or `keystore2` process and generates entire certificate chains from scratch, signed by your keybox, with correct attestation extensions. Apps that verify hardware attestation see a legitimate device.
 
 This is not TrickyStore. TEESimulator replaces TrickyStore and its forks entirely. It shares the same config paths for drop-in compatibility, but the internals are different: native Rust cert generation, binder-level interception via `lsplt`, per-UID rate limiting, key persistence, and AOSP-spec attestation behavior.
 
@@ -24,7 +24,7 @@ This is not TrickyStore. TEESimulator replaces TrickyStore and its forks entirel
 > [!IMPORTANT]
 > A valid `keybox.xml` is required for hardware-level attestation. Without one, the module generates software-level certificates that won't pass strict hardware checks.
 
-1. Android 10+
+1. Android 9+
 2. Root manager: KernelSU, Magisk, or APatch
 3. `keybox.xml` at `/data/adb/tricky_store/keybox.xml`
 
@@ -40,7 +40,7 @@ This is not TrickyStore. TEESimulator replaces TrickyStore and its forks entirel
 
 **Native Cert Generation** — `libcertgen.so` generates X.509 chains in Rust using `ring` and manual DER encoding. BouncyCastle fallback for unsupported curves (P-224, P-521, Curve25519).
 
-**Binder Interception** — PLT hook on `ioctl()` in `libc.so` via `lsplt` inside `keystore2`. Intercepts `generateKey`, `importKey`, and `getKeyEntry` transactions.
+**Binder Interception** — PLT hook on `ioctl()` in `libc.so` via `lsplt` inside `keystore` or `keystore2`. Android 9 uses the synchronous legacy Keystore contract; newer releases use their platform-specific Keystore/KeyMint transactions.
 
 **AOSP Compliance** — Self-signed certs for non-attested keys (matching `ta/src/keys.rs`), correct AuthorizationList tag ordering, version-guarded extension fields, `authorize_create` enforcement.
 
