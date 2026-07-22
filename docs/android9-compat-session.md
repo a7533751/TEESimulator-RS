@@ -3,8 +3,10 @@
 ## Scope
 
 Target device: ASUS I01WD / WW ZS630KL, Android 9, API 28, Qualcomm Keymaster.
-Target failure: hardware attestation returns vendor-specific `-10003`.
-Target behavior: preserve real Keystore private keys and only synthesize a certificate chain after the real `attestKey` transaction fails with `-10003`.
+Target failures: hardware attestation either returns vendor-specific `-10003` or succeeds with an
+untrusted/unlocked OEM certificate chain.
+Target behavior: preserve real Keystore private keys, rebuild successful certificate chains with the
+configured keybox, and synthesize a certificate chain after `attestKey` fails with `-10003`.
 
 This is an attestation compatibility layer, not a repair of OEM TEE provisioning.
 
@@ -23,6 +25,12 @@ This is an attestation compatibility layer, not a repair of OEM TEE provisioning
 - Added a compile-only Android 9 `IKeystoreService` declaration and `KeymasterBlob` declaration.
 - Added Pie synchronous transaction handling for `generateKey` and `attestKey`.
 - Added fallback path: export the generated hardware public key, generate a chain, and return it only when the original result is `-10003`.
+- Added successful-response handling: parse the synchronous Pie certificate-chain parcel, preserve
+  the original leaf public key and attestation parameters, then rebuild the chain with the configured
+  keybox.
+- Added synthesis fallback for malformed or unpatchable successful chains.
+- Fail closed for targeted Pie attestation when neither patching nor synthesis can replace a
+  successful OEM reply, preventing the real chain from being returned unchanged.
 - Added Android 9 OS/attestation version fallbacks.
 - Removed a direct runtime dependency on `KeyStoreException.isTransientFailure()` for API 28.
 - Added fail-closed module disable marker after repeated injection/backdoor failure.
@@ -47,8 +55,9 @@ This is an attestation compatibility layer, not a repair of OEM TEE provisioning
 ## Verification Status
 
 - `git diff --check`: passed.
-- Host C++ syntax check for `supervisor.cpp`: passed.
-- Gradle compile: not run successfully; host only has JDK 11 while this repository requires JDK 17+.
+- Successful-chain parcel reader checked against the Android 9 AOSP
+  `KeymasterCertificateChain.writeToParcel` layout.
+- Gradle compile/build: not run, per request; cloud CI is the build authority for this branch.
 - Android 9 device test: pending.
 
 ## Next Actions
@@ -57,7 +66,9 @@ This is an attestation compatibility layer, not a repair of OEM TEE provisioning
 2. Fix any Kotlin/API-28 compile or verifier issues.
 3. Install only on a recoverable test setup; keep the module disabled until a clean boot is confirmed.
 4. Test Key Attestation with all other Zygisk/LSPosed/PIF modules disabled.
-5. Capture `logcat -b all -s TEESimulator KeyMasterHalDevice keystore` and verify the fallback reply.
+5. Capture `logcat -b all -s TEESimulator KeyMasterHalDevice keystore` and verify either
+   `Replaced successful QTI Pie attestation` or the existing `Replaced QTI Pie attestation failure`
+   path.
 6. Test WorldFirst only after Key Attestation and ordinary hardware key operations are stable.
 
 ## Safety Rules

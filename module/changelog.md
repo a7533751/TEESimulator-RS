@@ -2,6 +2,14 @@
 
 AUTO-mode key attestation now forges plain attestation from the keybox instead of deferring to the real TEE.
 
+### Android 9
+- Targeted synchronous `attestKey` calls now replace successful QTI certificate chains as well as
+  the existing `-10003` failure path. Successful chains retain the hardware leaf public key and are
+  rebuilt with the configured keybox.
+- Malformed or unpatchable successful replies fall back to hardware-public-key synthesis. If both
+  replacement paths fail, the target receives an attestation error instead of the real unlocked
+  certificate chain.
+
 ### Detection coverage
 - AUTO dispatch probed the device with `checkTeeFunctionality`, which only proves the TEE can mint one EC key. It says nothing about RSA attestation, device-ID attestation, or whether a patched chain survives RSA verify. Plain attestation requests (attest-key OFF, challenge present) were routed to PATCH and deferred to hardware, so devices that can't back that surfaced KeyAttestation reds: `ATTESTATION_KEYS_NOT_PROVISIONED` (-49) and `BLOCK_TYPE_IS_NOT_01`.
 - AUTO targets carrying an attestation challenge now take the FORGE path, the same one attest-key-ON already used: a synthetic chain built from the keybox and rooted under the Google root key. Requests with no challenge still pass through to real hardware, so KeyDetector's hardware-backed checks are unaffected.
